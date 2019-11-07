@@ -266,7 +266,9 @@ def main():
             'finished': None,
             'released': 'backup',
         })
-        StateMachine.add('backup', ActionUntil(MoveForwardAction(-v), TimerListener(5)), transitions={'timeout': 'find_marker'})
+        StateMachine.add('backup', ActionUntil(MoveForwardAction(-v), TimerListener(5)),
+                         transitions={'timeout': 'backup2'})
+        StateMachine.add('backup2', ActionUntil(MoveForwardAction(-v), FindMarkerListener(marker_tracker)), transitions={'found': 'find_marker'})
 
     sis = IntrospectionServer('smach_server', sm, '/SM_ROOT')
     sis.start()
