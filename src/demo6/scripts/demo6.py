@@ -59,29 +59,65 @@ class BumperListener:
         return 'bumper_left', 'bumper_right'
 
 
+class DebouncedButton:
+    def __init__(self):
+        self._pressed = False
+        self._debounced_pressed = False
+        self.last_released_time = rospy.get_time()
+        self.last_pressed_time = rospy.get_time()
+
+    def press(self):
+        self._pressed = True
+        self.last_pressed_time = rospy.get_time()
+
+    def release(self):
+        self._pressed = False
+        self.last_released_time = rospy.get_time()
+
+    @property
+    def pressed(self):
+        time_since_press = rospy.get_time() - self.last_pressed_time
+        time_since_release = rospy.get_time() - self.last_released_time
+        if self._pressed == self._debounced_pressed:
+            return self._pressed
+        if self._pressed and time_since_press > 0.05:
+            self._debounced_pressed = self._pressed
+        if not self._pressed and time_since_release > 0.05:
+            self._debounced_pressed = self._pressed
+        return self._debounced_pressed
+
+
 class NoBumperListener:
     def __init__(self):
         self.bumper_listener = rospy.Subscriber('/mobile_base/events/bumper', BumperEvent, self.bumper_callback)
         self.result = None
-        self.last_release = None
-        self.debounce_time = 0.1
+        self.left = DebouncedButton()
+        self.right = DebouncedButton()
+        self.center = DebouncedButton()
+        self.previously_pressed = False
 
     def init(self):
-        self.last_release = None
+        self.left = DebouncedButton()
+        self.right = DebouncedButton()
+        self.center = DebouncedButton()
+        self.previously_pressed = False
         self.result = None
 
     def bumper_callback(self, msg):  # type: (BumperEvent) -> None
-        if msg.bumper != msg.LEFT or msg.bumper != msg.RIGHT:
-            return
-        if msg.state == msg.RELEASED:
-            self.last_release = rospy.get_time()
-            self.result = 'released'
-        elif msg.state == msg.PRESSED:
-            self.last_release = None
+        if msg.bumper == msg.LEFT:
+            self.left.press() if msg.state == msg.PRESSED else self.left.release()
+        if msg.bumper == msg.RIGHT:
+            self.right.press() if msg.state == msg.PRESSED else self.right.release()
+        if msg.bumper == msg.CENTER:
+            self.center.press() if msg.state == msg.PRESSED else self.center.release()
 
     def __call__(self):
-        if self.last_release is not None and rospy.get_time() - self.last_release < self.debounce_time:
-            return None
+        print(self.left.pressed)
+        if self.left.pressed or self.right.pressed or self.center.pressed:
+            self.previously_pressed = True
+        elif self.previously_pressed:
+            if not (self.left.pressed or self.right.pressed or self.center.pressed):
+                self.result = 'released'
         return self.result
 
     @property
