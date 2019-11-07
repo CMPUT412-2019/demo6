@@ -1,0 +1,21 @@
+<launch>
+    <include file="$(find turtlebot_bringup)/launch/minimal.launch" />
+    <include file="$(find turtlebot_bringup)/launch/3dsensor.launch" />
+
+    <include file="$(find demo6)/launch/includes/turtlebot_navigation/move_base.launch.xml">
+        <arg name="global_frame_id" value="odom" />
+        <arg name="use_safety_controller" value="false" />
+    </include>
+
+    <arg name="map_file" default="$(find demo6)/maps/empty/map.yaml"/>
+    <node name="map_server" pkg="map_server" type="map_server" args="$(arg map_file)" />
+
+    <include file="$(find ar_track_alvar)/launch/pr2_indiv_no_kinect.launch">
+        <arg name="marker_size" value="20" />
+        <arg name="cam_image_topic" value="/camera/rgb/image_rect_color" />
+        <arg name="cam_info_topic" value="/camera/rgb/camera_info" />
+        <arg name="output_frame" value="odom" />
+    </include>
+
+    <node pkg="rviz" name="rviz" type="rviz" args="-d $(find demo6)/rviz/demo6.rviz" />
+</launch>
