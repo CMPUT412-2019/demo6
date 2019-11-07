@@ -7,6 +7,7 @@ from nav_msgs.msg import Odometry
 from kobuki_msgs.msg import BumperEvent
 from geometry_msgs.msg import Twist, PoseStamped, Point, Quaternion
 from ros_numpy import numpify
+from smach_ros import IntrospectionServer
 from smach import State, StateMachine, Sequence
 from tf import transformations
 
@@ -56,6 +57,28 @@ class BumperListener:
     @property
     def outcomes(self):
         return 'bumper_left', 'bumper_right'
+
+
+class NoBumperListener:
+    def __init__(self):
+        self.bumper_listener = rospy.Subscriber('/mobile_base/events/bumper', BumperEvent, self.bumper_callback)
+        self.result = None
+        self.last_release = None
+
+    def init(self):
+        self.last_release = rospy.get_time()
+        self.result = None
+
+    def bumper_callback(self, msg):  # type: (BumperEvent) -> None
+        if msg.state == msg.RELEASED and (msg.bumper == msg.LEFT or msg.bumper == msg.RIGHT):
+            self.result = 'released'
+
+    def __call__(self):
+        return self.result
+
+    @property
+    def outcomes(self):
+        return 'released',
 
 
 class CombinedListener:
@@ -196,11 +219,13 @@ class ChooseNewNavGoalState(State):
 
         marker_position = np.array([marker_pose.pose.position.x, marker_pose.pose.position.y])
 
-        r_mo = marker_position - self.origin
-        goal_position = marker_position + self.back_distance * r_mo / np.linalg.norm(r_mo)
+        r_mo = transformations.unit_vector(marker_position - self.origin)
+        goal_position = marker_position + self.back_distance * r_mo
 
-        theta = atan2(r_mo[1], r_mo[0])
-        orientation_facing_marker = transformations.quaternion_from_euler(0, 0, -theta, axes='sxyz')
+        e_mo = transformations.unit_vector(np.append(r_mo, [0]))
+        orientation_facing_marker = np.eye(4)
+        orientation_facing_marker[0:3, 0:3] = np.column_stack((-e_mo, np.cross([0, 0, 1], -e_mo), [0, 0, 1]))
+        orientation_facing_marker = transformations.quaternion_from_matrix(orientation_facing_marker)
 
         goal_pose = PoseStamped()
         goal_pose.header.frame_id = marker_pose.header.frame_id
@@ -229,12 +254,14 @@ def main():
         StateMachine.add('find_marker', FindMarker(marker_tracker), transitions={'ok': 'choose_goal', 'err': None})
         StateMachine.add('choose_goal', ChooseNewNavGoalState(np.array([0., 0.]), 1.), transitions={'ok': 'go_to_goal'})
         StateMachine.add('go_to_goal', NavigateToGoalState(), transitions={'ok': 'push_box', 'err': None})
-        StateMachine.add('push_box', ActionUntil(MoveForwardAction(v), CombinedListener([FinishedListener(), BumperListener()])), transitions={
+        StateMachine.add('push_box', ActionUntil(MoveForwardAction(v), CombinedListener([FinishedListener(), NoBumperListener()])), transitions={
             'finished': None,
-            'bumper_left': 'backup',
-            'bumper_right': 'backup',
+            'released': 'backup',
         })
-        StateMachine.add('backup', ActionUntil(MoveForwardAction(-v), TimerListener(2)), transitions={'timeout': 'find_marker'})
+        StateMachine.add('backup', ActionUntil(MoveForwardAction(-v), TimerListener(5)), transitions={'timeout': 'find_marker'})
+
+    sis = IntrospectionServer('smach_server', sm, '/SM_ROOT')
+    sis.start()
 
     sm.execute()
 
