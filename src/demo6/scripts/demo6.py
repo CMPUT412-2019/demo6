@@ -26,7 +26,7 @@ class FinishedListener:
         self.result = None
 
     def odom_callback(self, msg):  # type: (Odometry) -> None
-        if msg.pose.pose.position.x < 0:
+        if msg.pose.pose.position.x < -0.5:
             self.result = 'finished'
 
     def __call__(self):
@@ -260,7 +260,7 @@ def main():
     sm = StateMachine(outcomes=['ok', 'err', 'finished'])
     with sm:
         StateMachine.add('find_marker', FindMarker(marker_tracker), transitions={'ok': 'choose_goal', 'err': None})
-        StateMachine.add('choose_goal', ChooseNewNavGoalState(np.array([0., 0.]), 1.), transitions={'ok': 'go_to_goal'})
+        StateMachine.add('choose_goal', ChooseNewNavGoalState(np.array([-0.5, 0.]), 1.), transitions={'ok': 'go_to_goal'})
         StateMachine.add('go_to_goal', NavigateToGoalState(), transitions={'ok': 'push_box', 'err': None})
         StateMachine.add('push_box', ActionUntil(MoveForwardAction(v), CombinedListener([FinishedListener(), NoBumperListener()])), transitions={
             'finished': None,
