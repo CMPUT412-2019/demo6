@@ -1,11 +1,19 @@
+from math import atan2
+
 import rospy
+from actionlib import SimpleActionClient
+from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
 from nav_msgs.msg import Odometry
 from kobuki_msgs.msg import BumperEvent
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, PoseStamped, Point, Quaternion
 from ros_numpy import numpify
-from smach import State, StateMachine
+from smach import State, StateMachine, Sequence
+from tf import transformations
 
 import numpy as np
+
+from marker_tracker import MarkerTracker
+from util import SubscriberValue
 
 
 class FinishedListener:
@@ -140,6 +148,74 @@ class ActionUntil(State):
             self.rate.sleep()
 
 
+class FindMarker(State):
+    def __init__(self, marker_tracker):  # type: (MarkerTracker) -> None
+        super(FindMarker, self).__init__(outcomes=['ok', 'err'], output_keys=['marker_pose'])
+        self.marker_tracker = marker_tracker
+
+    def execute(self, ud):
+        while not rospy.is_shutdown():
+            try:
+                markers = self.marker_tracker.get_visible_markers()
+                marker_id = next(iter(markers))
+                marker_pose = self.marker_tracker.get_pose(marker_id)
+                marker_pose.header.frame_id = 'odom'
+                ud.marker_pose = marker_pose
+            except StopIteration:
+                continue
+            return 'ok'
+
+
+class NavigateToGoalState(State):
+    def __init__(self):
+        super(NavigateToGoalState, self).__init__(outcomes=['ok', 'err'], input_keys=['target_pose'])
+        self.client = SimpleActionClient('move_base', MoveBaseAction)
+
+    def execute(self, ud):
+        pose = ud.target_pose  # type: PoseStamped
+        self.client.wait_for_server()
+        goal = MoveBaseGoal()
+        goal.target_pose.header.frame_id = pose.header.frame_id
+        goal.target_pose.pose.position = pose.pose.position
+        goal.target_pose.pose.orientation = pose.pose.orientation
+        self.client.send_goal(goal)
+        if self.client.wait_for_result():
+            return 'ok'
+        else:
+            return 'err'
+
+
+class ChooseNewNavGoalState(State):
+    def __init__(self, origin, back_distance):  # type: (np.ndarray, float)
+        super(ChooseNewNavGoalState, self).__init__(outcomes=['ok'], input_keys=['marker_pose'], output_keys=['target_pose'])
+        self.origin = origin
+        self.back_distance = back_distance
+
+    def execute(self, ud):
+        marker_pose = ud.marker_pose  # type: PoseStamped
+
+        marker_position = np.array([marker_pose.pose.position.x, marker_pose.pose.position.y])
+
+        r_mo = marker_position - self.origin
+        goal_position = marker_position + self.back_distance * r_mo / np.linalg.norm(r_mo)
+
+        theta = atan2(r_mo[1], r_mo[0])
+        orientation_facing_marker = transformations.quaternion_from_euler(0, 0, -theta, axes='sxyz')
+
+        goal_pose = PoseStamped()
+        goal_pose.header.frame_id = marker_pose.header.frame_id
+        goal_pose.pose.position = Point(goal_position[0], goal_position[1], 0)
+        goal_pose.pose.orientation = Quaternion(
+            orientation_facing_marker[0],
+            orientation_facing_marker[1],
+            orientation_facing_marker[2],
+            orientation_facing_marker[3],
+        )
+        # goal_pose.pose.orientation = Quaternion(0, 0, 0, 1)
+        ud.target_pose = goal_pose
+        return 'ok'
+
+
 def main():
     v = 0.2
     w = 1
@@ -147,17 +223,18 @@ def main():
     turn_time = 1.2
     move_time = 1.5
 
-    sm = StateMachine(outcomes=['bumper_left', 'bumper_right', 'finished'])
+    marker_tracker = MarkerTracker()
+    sm = StateMachine(outcomes=['ok', 'err', 'finished'])
     with sm:
-        StateMachine.add('forward', ActionUntil(MoveForwardAction(v), CombinedListener([FinishedListener(), BumperListener()])), transitions={'finished': None, 'bumper_left': 'turn_left', 'bumper_right': 'turn_right'})
-
-        StateMachine.add('turn_left', ActionUntil(TurnAction(w), TimerListener(turn_time)), transitions={'timeout': 'move_left'})
-        StateMachine.add('move_left', ActionUntil(MoveForwardAction(v), TimerListener(move_time)), transitions={'timeout': 'unturn_left'})
-        StateMachine.add('unturn_left', ActionUntil(TurnAction(-w), TimerListener(turn_time)), transitions={'timeout': 'forward'})
-
-        StateMachine.add('turn_right', ActionUntil(TurnAction(-w), TimerListener(turn_time)), transitions={'timeout': 'move_right'})
-        StateMachine.add('move_right', ActionUntil(MoveForwardAction(v), TimerListener(move_time)), transitions={'timeout': 'unturn_right'})
-        StateMachine.add('unturn_right', ActionUntil(TurnAction(w), TimerListener(turn_time)), transitions={'timeout': 'forward'})
+        StateMachine.add('find_marker', FindMarker(marker_tracker), transitions={'ok': 'choose_goal', 'err': None})
+        StateMachine.add('choose_goal', ChooseNewNavGoalState(np.array([0., 0.]), 1.), transitions={'ok': 'go_to_goal'})
+        StateMachine.add('go_to_goal', NavigateToGoalState(), transitions={'ok': 'push_box', 'err': None})
+        StateMachine.add('push_box', ActionUntil(MoveForwardAction(v), CombinedListener([FinishedListener(), BumperListener()])), transitions={
+            'finished': None,
+            'bumper_left': 'backup',
+            'bumper_right': 'backup',
+        })
+        StateMachine.add('backup', ActionUntil(MoveForwardAction(-v), TimerListener(2)), transitions={'timeout': 'find_marker'})
 
     sm.execute()
 
