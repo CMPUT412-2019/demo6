@@ -130,6 +130,22 @@ class TimerListener:
         return 'timeout',
 
 
+class FindMarkerListener:
+    def __init__(self, marker_tracker):  # type: (MarkerTracker) -> None
+        self.marker_tracker = marker_tracker
+
+    def init(self):
+        pass
+
+    def __call__(self):
+        if self.marker_tracker.get_visible_markers():
+            return 'found'
+
+    @property
+    def outcomes(self):
+        return 'found',
+
+
 class MoveForwardAction:
     def __init__(self, v):
         self.v = v
