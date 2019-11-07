@@ -64,16 +64,24 @@ class NoBumperListener:
         self.bumper_listener = rospy.Subscriber('/mobile_base/events/bumper', BumperEvent, self.bumper_callback)
         self.result = None
         self.last_release = None
+        self.debounce_time = 0.1
 
     def init(self):
-        self.last_release = rospy.get_time()
+        self.last_release = None
         self.result = None
 
     def bumper_callback(self, msg):  # type: (BumperEvent) -> None
-        if msg.state == msg.RELEASED and (msg.bumper == msg.LEFT or msg.bumper == msg.RIGHT):
+        if msg.bumper != msg.LEFT or msg.bumper != msg.RIGHT:
+            return
+        if msg.state == msg.RELEASED:
+            self.last_release = rospy.get_time()
             self.result = 'released'
+        elif msg.state == msg.PRESSED:
+            self.last_release = None
 
     def __call__(self):
+        if self.last_release is not None and rospy.get_time() - self.last_release < self.debounce_time:
+            return None
         return self.result
 
     @property
