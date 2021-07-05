@@ -26,7 +26,7 @@ class FinishedListener:
         self.result = None
 
     def odom_callback(self, msg):  # type: (Odometry) -> None
-        if msg.pose.pose.position.x < 0:
+        if msg.pose.pose.position.x < -0.5:
             self.result = 'finished'
 
     def __call__(self):
@@ -59,21 +59,65 @@ class BumperListener:
         return 'bumper_left', 'bumper_right'
 
 
+class DebouncedButton:
+    def __init__(self):
+        self._pressed = False
+        self._debounced_pressed = False
+        self.last_released_time = rospy.get_time()
+        self.last_pressed_time = rospy.get_time()
+
+    def press(self):
+        self._pressed = True
+        self.last_pressed_time = rospy.get_time()
+
+    def release(self):
+        self._pressed = False
+        self.last_released_time = rospy.get_time()
+
+    @property
+    def pressed(self):
+        time_since_press = rospy.get_time() - self.last_pressed_time
+        time_since_release = rospy.get_time() - self.last_released_time
+        if self._pressed == self._debounced_pressed:
+            return self._pressed
+        if self._pressed and time_since_press > 0.05:
+            self._debounced_pressed = self._pressed
+        if not self._pressed and time_since_release > 0.05:
+            self._debounced_pressed = self._pressed
+        return self._debounced_pressed
+
+
 class NoBumperListener:
     def __init__(self):
         self.bumper_listener = rospy.Subscriber('/mobile_base/events/bumper', BumperEvent, self.bumper_callback)
         self.result = None
-        self.last_release = None
+        self.left = DebouncedButton()
+        self.right = DebouncedButton()
+        self.center = DebouncedButton()
+        self.previously_pressed = False
 
     def init(self):
-        self.last_release = rospy.get_time()
+        self.left = DebouncedButton()
+        self.right = DebouncedButton()
+        self.center = DebouncedButton()
+        self.previously_pressed = False
         self.result = None
 
     def bumper_callback(self, msg):  # type: (BumperEvent) -> None
-        if msg.state == msg.RELEASED and (msg.bumper == msg.LEFT or msg.bumper == msg.RIGHT):
-            self.result = 'released'
+        if msg.bumper == msg.LEFT:
+            self.left.press() if msg.state == msg.PRESSED else self.left.release()
+        if msg.bumper == msg.RIGHT:
+            self.right.press() if msg.state == msg.PRESSED else self.right.release()
+        if msg.bumper == msg.CENTER:
+            self.center.press() if msg.state == msg.PRESSED else self.center.release()
 
     def __call__(self):
+        print(self.left.pressed)
+        if self.left.pressed or self.right.pressed or self.center.pressed:
+            self.previously_pressed = True
+        elif self.previously_pressed:
+            if not (self.left.pressed or self.right.pressed or self.center.pressed):
+                self.result = 'released'
         return self.result
 
     @property
@@ -120,6 +164,22 @@ class TimerListener:
     @property
     def outcomes(self):
         return 'timeout',
+
+
+class FindMarkerListener:
+    def __init__(self, marker_tracker):  # type: (MarkerTracker) -> None
+        self.marker_tracker = marker_tracker
+
+    def init(self):
+        pass
+
+    def __call__(self):
+        if self.marker_tracker.get_visible_markers():
+            return 'found'
+
+    @property
+    def outcomes(self):
+        return 'found',
 
 
 class MoveForwardAction:
@@ -252,13 +312,15 @@ def main():
     sm = StateMachine(outcomes=['ok', 'err', 'finished'])
     with sm:
         StateMachine.add('find_marker', FindMarker(marker_tracker), transitions={'ok': 'choose_goal', 'err': None})
-        StateMachine.add('choose_goal', ChooseNewNavGoalState(np.array([0., 0.]), 1.), transitions={'ok': 'go_to_goal'})
+        StateMachine.add('choose_goal', ChooseNewNavGoalState(np.array([-0.5, 0.]), 1.), transitions={'ok': 'go_to_goal'})
         StateMachine.add('go_to_goal', NavigateToGoalState(), transitions={'ok': 'push_box', 'err': None})
         StateMachine.add('push_box', ActionUntil(MoveForwardAction(v), CombinedListener([FinishedListener(), NoBumperListener()])), transitions={
             'finished': None,
             'released': 'backup',
         })
-        StateMachine.add('backup', ActionUntil(MoveForwardAction(-v), TimerListener(5)), transitions={'timeout': 'find_marker'})
+        StateMachine.add('backup', ActionUntil(MoveForwardAction(-v), TimerListener(5)),
+                         transitions={'timeout': 'backup2'})
+        StateMachine.add('backup2', ActionUntil(MoveForwardAction(-v), FindMarkerListener(marker_tracker)), transitions={'found': 'find_marker'})
 
     sis = IntrospectionServer('smach_server', sm, '/SM_ROOT')
     sis.start()
